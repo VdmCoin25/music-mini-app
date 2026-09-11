@@ -1,4 +1,16 @@
+import { createServer } from "node:http";
 import { Bot, InlineKeyboard } from "grammy";
+
+// Render (and most PaaS "web service" types) expect the process to bind a
+// port, even though this bot only needs outbound long-polling to Telegram.
+// This tiny server exists purely to satisfy that port-scan health check.
+const port = process.env.PORT ?? "10000";
+createServer((_req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("ok");
+}).listen(Number(port), () => {
+  console.log(`Healthcheck server listening on :${port}`);
+});
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const miniAppUrl = process.env.MINI_APP_URL; // e.g. https://your-domain.com
@@ -31,14 +43,14 @@ bot.command("start", async (ctx) => {
   }
 
   await ctx.reply(
-    "Welcome! This bot connects to the Music Mini App — upload tracks and beats, build playlists, and discover new music, all inside Telegram.",
+    "Welcome! This bot connects to the Music Mini App -- upload tracks and beats, build playlists, and discover new music, all inside Telegram.",
     { reply_markup: mainKeyboard() },
   );
 });
 
 bot.command("help", async (ctx) => {
   await ctx.reply(
-    "/start — open the app\nJust tap a button below to jump straight to the app, your profile, or the upload screen.",
+    "/start -- open the app\nJust tap a button below to jump straight to the app, your profile, or the upload screen.",
     { reply_markup: mainKeyboard() },
   );
 });
