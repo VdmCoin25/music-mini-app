@@ -16,6 +16,7 @@ import beatRoutes from "./routes/beats.js";
 import albumRoutes from "./routes/albums.js";
 import reportRoutes from "./routes/reports.js";
 import adminRoutes from "./routes/admin.js";
+import commentRoutes from "./routes/comments.js";
 
 async function main() {
   const app = Fastify({ logger: true, trustProxy: true });
@@ -40,6 +41,7 @@ async function main() {
   await app.register(albumRoutes);
   await app.register(reportRoutes);
   await app.register(adminRoutes);
+  await app.register(commentRoutes);
 
   app.setErrorHandler((err, _req, reply) => {
     app.log.error(err);
