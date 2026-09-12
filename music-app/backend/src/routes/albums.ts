@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
+import { normalizeLocalTrack, normalizeExternalTrack } from "../services/catalog.js";
 
 const createSchema = z.object({
   title: z.string().min(1).max(120),
@@ -44,8 +45,17 @@ export default async function albumRoutes(app: FastifyInstance) {
       where: { isHidden: false },
       orderBy: { createdAt: "desc" },
       take: 30,
+      include: { artist: true, genre: true },
+    });
+    const externalTracks = await prisma.externalTrack.findMany({
+      orderBy: { releaseDate: "desc" },
+      take: 30,
       include: { artist: true },
     });
-    return reply.send(tracks);
+    const merged = [
+      ...tracks.map(normalizeLocalTrack),
+      ...externalTracks.map(normalizeExternalTrack),
+    ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return reply.send(merged.slice(0, 40));
   });
 }
