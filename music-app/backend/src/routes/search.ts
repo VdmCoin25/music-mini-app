@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { prisma } from "../db.js";
 import { normalizeLocalTrack, normalizeExternalTrack } from "../services/catalog.js";
+import { liveSearchAndCacheItunes } from "../services/itunes.js";
 
 export default async function searchRoutes(app: FastifyInstance) {
   app.get("/search", async (req, reply) => {
@@ -25,16 +26,33 @@ export default async function searchRoutes(app: FastifyInstance) {
       prisma.beat.findMany({ where: { title: { contains: query, mode: "insensitive" } }, take: 20, include: { producer: true } }),
       prisma.playlist.findMany({ where: { isPublic: true, title: { contains: query, mode: "insensitive" } }, take: 20 }),
       prisma.externalTrack.findMany({
-        where: { title: { contains: query, mode: "insensitive" } },
+        where: { OR: [{ title: { contains: query, mode: "insensitive" } }, { artist: { name: { contains: query, mode: "insensitive" } } }] },
         take: 20,
         include: { artist: true },
       }),
       prisma.externalArtist.findMany({ where: { name: { contains: query, mode: "insensitive" } }, take: 20 }),
     ]);
 
+    // If our own cached catalog doesn't have much for this query yet, ask
+    // Apple's live iTunes Search API and cache whatever it finds — this is
+    // what lets people find literally any track, not just pre-imported ones.
+    let liveTracks: any[] = [];
+    if (externalTracks.length < 5) {
+      liveTracks = await liveSearchAndCacheItunes(query, 15);
+    }
+
+    const allExternal = [...externalTracks];
+    const seenIds = new Set(externalTracks.map((t) => t.id));
+    for (const t of liveTracks) {
+      if (!seenIds.has(t.id)) {
+        allExternal.push(t);
+        seenIds.add(t.id);
+      }
+    }
+
     const mergedTracks = [
       ...tracks.map(normalizeLocalTrack),
-      ...externalTracks.map(normalizeExternalTrack),
+      ...allExternal.map(normalizeExternalTrack),
     ].sort((a, b) => (b.totalPlays ?? 0) - (a.totalPlays ?? 0));
 
     const mergedArtists = [
