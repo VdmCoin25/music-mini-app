@@ -1,6 +1,18 @@
 import type { FastifyInstance } from "fastify";
 import { prisma } from "../db.js";
 
+/**
+ * Imports popular artists and tracks from Apple's public iTunes Search API.
+ * This is a free, official, no-auth-required endpoint (the same one that
+ * powers "Search" in iTunes/Apple Music affiliate widgets) — no API key,
+ * no login, no subscription required on either side.
+ *
+ * We store metadata only: title, cover art, album, genre, release date,
+ * duration, and an official 30-60s preview clip URL hosted on Apple's own
+ * CDN (never downloaded or re-hosted by us) plus a link to open the full
+ * track in the Apple Music / iTunes app.
+ */
+
 const DEFAULT_ARTISTS = [
   "Drake",
   "Kendrick Lamar",
@@ -14,81 +26,74 @@ const DEFAULT_ARTISTS = [
   "Billie Eilish",
 ];
 
-async function getAccessToken(): Promise<string> {
-  const clientId = process.env.SPOTIFY_CLIENT_ID;
-  const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
-  if (!clientId || !clientSecret) {
-    throw new Error("SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET are missing");
-  }
-  const res = await fetch("https://accounts.spotify.com/api/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
-    },
-    body: "grant_type=client_credentials",
-  });
-  if (!res.ok) throw new Error(`Spotify auth failed: ${res.status} ${await res.text()}`);
+function upsizeArtwork(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  return url.replace(/\/\d+x\d+bb\.(jpg|png)$/, "/600x600bb.$1");
+}
+
+async function importArtist(name: string): Promise<string> {
+  const url = `https://itunes.apple.com/search?term=${encodeURIComponent(name)}&entity=song&limit=15&media=music`;
+  const res = await fetch(url);
+  if (!res.ok) return `${name}: FAILED - iTunes API error ${res.status}`;
   const data = await res.json();
-  return data.access_token;
-}
+  const results: any[] = data.results ?? [];
 
-async function spotifyGet(path: string, token: string) {
-  const res = await fetch(`https://api.spotify.com/v1${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) throw new Error(`Spotify API error on ${path}: ${res.status} ${await res.text()}`);
-  return res.json();
-}
+  const matching = results.filter(
+    (t) => t.artistName && t.artistName.toLowerCase() === name.toLowerCase(),
+  );
+  const tracks = matching.length > 0 ? matching : results;
+  if (tracks.length === 0) return `${name}: no results found, skipped.`;
 
-async function importArtist(name: string, token: string): Promise<string> {
-  const searchResult = await spotifyGet(`/search?q=${encodeURIComponent(name)}&type=artist&limit=1`, token);
-  const spotifyArtist = searchResult.artists?.items?.[0];
-  if (!spotifyArtist) return `No Spotify artist found for "${name}", skipped.`;
-
+  const first = tracks[0];
   const artist = await prisma.externalArtist.upsert({
-    where: { source_externalId: { source: "spotify", externalId: spotifyArtist.id } },
+    where: { source_externalId: { source: "itunes", externalId: String(first.artistId) } },
     create: {
-      source: "spotify",
-      externalId: spotifyArtist.id,
-      name: spotifyArtist.name,
-      imageUrl: spotifyArtist.images?.[0]?.url,
-      genres: spotifyArtist.genres ?? [],
-      popularity: spotifyArtist.popularity ?? 0,
-      externalUrl: spotifyArtist.external_urls?.spotify ?? `https://open.spotify.com/artist/${spotifyArtist.id}`,
+      source: "itunes",
+      externalId: String(first.artistId),
+      name: first.artistName,
+      imageUrl: upsizeArtwork(first.artworkUrl100),
+      genres: first.primaryGenreName ? [first.primaryGenreName] : [],
+      popularity: 60,
+      externalUrl: first.artistViewUrl ?? `https://music.apple.com/search?term=${encodeURIComponent(name)}`,
     },
     update: {
-      name: spotifyArtist.name,
-      imageUrl: spotifyArtist.images?.[0]?.url,
-      genres: spotifyArtist.genres ?? [],
-      popularity: spotifyArtist.popularity ?? 0,
+      imageUrl: upsizeArtwork(first.artworkUrl100),
+      genres: first.primaryGenreName ? [first.primaryGenreName] : [],
     },
   });
 
-  const topTracks = await spotifyGet(`/artists/${spotifyArtist.id}/top-tracks?market=US`, token);
   let previewCount = 0;
-  for (const t of topTracks.tracks ?? []) {
+  const seen = new Set<string>();
+  for (let i = 0; i < tracks.length; i++) {
+    const t = tracks[i];
+    if (!t.trackId || seen.has(String(t.trackId))) continue;
+    seen.add(String(t.trackId));
+
     await prisma.externalTrack.upsert({
-      where: { source_externalId: { source: "spotify", externalId: t.id } },
+      where: { source_externalId: { source: "itunes", externalId: String(t.trackId) } },
       create: {
-        source: "spotify",
-        externalId: t.id,
-        title: t.name,
+        source: "itunes",
+        externalId: String(t.trackId),
+        title: t.trackName,
         artistId: artist.id,
-        album: t.album?.name,
-        coverUrl: t.album?.images?.[0]?.url,
-        genre: spotifyArtist.genres?.[0] ?? null,
-        releaseDate: t.album?.release_date ? new Date(t.album.release_date) : null,
-        durationMs: t.duration_ms,
-        popularity: t.popularity ?? 0,
-        previewUrl: t.preview_url,
-        externalUrl: t.external_urls?.spotify ?? `https://open.spotify.com/track/${t.id}`,
+        album: t.collectionName,
+        coverUrl: upsizeArtwork(t.artworkUrl100),
+        genre: t.primaryGenreName ?? null,
+        releaseDate: t.releaseDate ? new Date(t.releaseDate) : null,
+        durationMs: t.trackTimeMillis ?? 0,
+        popularity: Math.max(10, 100 - i * 6),
+        previewUrl: t.previewUrl,
+        externalUrl: t.trackViewUrl ?? artist.externalUrl,
       },
-      update: { popularity: t.popularity ?? 0, previewUrl: t.preview_url },
+      update: {
+        previewUrl: t.previewUrl,
+        popularity: Math.max(10, 100 - i * 6),
+      },
     });
-    if (t.preview_url) previewCount += 1;
+    if (t.previewUrl) previewCount += 1;
   }
-  return `${artist.name}: imported ${topTracks.tracks?.length ?? 0} tracks (${previewCount} with previews)`;
+
+  return `${artist.name}: imported ${seen.size} tracks (${previewCount} with playable previews)`;
 }
 
 export default async function internalImportRoutes(app: FastifyInstance) {
@@ -99,11 +104,10 @@ export default async function internalImportRoutes(app: FastifyInstance) {
     }
 
     const targets = artists ? artists.split(",").map((a) => a.trim()) : DEFAULT_ARTISTS;
-    const token = await getAccessToken();
     const results: string[] = [];
     for (const name of targets) {
       try {
-        results.push(await importArtist(name, token));
+        results.push(await importArtist(name));
       } catch (err) {
         results.push(`${name}: FAILED - ${(err as Error).message}`);
       }
