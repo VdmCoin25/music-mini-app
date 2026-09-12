@@ -289,3 +289,47 @@ model Notification {
 
   @@index([userId, isRead])
 }
+
+// ─── External catalog (Spotify Web API) ────────────────────────────────────
+// These hold READ-ONLY metadata pulled from official APIs — never raw audio.
+// Playback is either a short official preview clip (served directly from
+// Spotify's own CDN, not copied onto our server) or a link out to the
+// official source. See src/scripts/importSpotifyCatalog.ts.
+
+model ExternalArtist {
+  id          String   @id @default(uuid())
+  source      String // "spotify"
+  externalId  String
+  name        String
+  imageUrl    String?
+  genres      String[] @default([])
+  popularity  Int      @default(0)
+  externalUrl String
+  createdAt   DateTime @default(now())
+
+  tracks ExternalTrack[]
+
+  @@unique([source, externalId])
+}
+
+model ExternalTrack {
+  id          String         @id @default(uuid())
+  source      String // "spotify"
+  externalId  String
+  title       String
+  artistId    String
+  artist      ExternalArtist @relation(fields: [artistId], references: [id])
+  album       String?
+  coverUrl    String?
+  genre       String?
+  releaseDate DateTime?
+  durationMs  Int
+  popularity  Int            @default(0)
+  previewUrl  String? // official 30s clip URL from Spotify's own CDN, or null
+  externalUrl String // https://open.spotify.com/track/...
+  createdAt   DateTime       @default(now())
+
+  @@unique([source, externalId])
+  @@index([popularity])
+  @@index([genre])
+}
